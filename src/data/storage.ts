@@ -1,17 +1,71 @@
 import { DataEntry, PercentageConfig, PhoneBrand, User } from '../models';
 import { DataEntry as IDataEntry, PhoneBrand as IPhoneBrand } from '../types';
 
+// Simple in-memory cache
+interface CacheItem<T> {
+  data: T;
+  timestamp: number;
+  ttl: number; // time to live in milliseconds
+}
+
 class DataService {
+  private cache: Map<string, CacheItem<any>> = new Map();
+  private readonly DEFAULT_TTL = 5 * 60 * 1000; // 5 minutes
+
+  private getCacheKey(prefix: string, ...params: string[]): string {
+    return `${prefix}:${params.join(':')}`;
+  }
+
+  private isValidCacheItem<T>(item: CacheItem<T>): boolean {
+    return Date.now() - item.timestamp < item.ttl;
+  }
+
+  private getFromCache<T>(key: string): T | null {
+    const item = this.cache.get(key);
+    if (item && this.isValidCacheItem(item)) {
+      return item.data;
+    }
+    if (item) {
+      this.cache.delete(key); // Remove expired item
+    }
+    return null;
+  }
+
+  private setCache<T>(key: string, data: T, ttl: number = this.DEFAULT_TTL): void {
+    this.cache.set(key, {
+      data,
+      timestamp: Date.now(),
+      ttl
+    });
+  }
+
+  private clearCacheByPrefix(prefix: string): void {
+    for (const key of this.cache.keys()) {
+      if (key.startsWith(prefix)) {
+        this.cache.delete(key);
+      }
+    }
+  }
+
   // Data methods
   async getAllData(): Promise<IDataEntry[]> {
+    const cacheKey = this.getCacheKey('allData');
+    const cached = this.getFromCache<IDataEntry[]>(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
     const data = await DataEntry.find().lean();
-    return data.map(item => ({
+    const result = data.map(item => ({
       _id: item._id?.toString(),
       B1: item.B1,
       B2: item.B2,
       B3: item.B3,
       detail: item.detail
     }));
+
+    this.setCache(cacheKey, result);
+    return result;
   }
 
   async setData(data: IDataEntry[]): Promise<void> {
@@ -21,6 +75,9 @@ class DataService {
     
     // Insert new data
     await DataEntry.insertMany(data);
+
+    // Clear all cache when data is updated
+    this.cache.clear();
   }
 
   async addDataEntry(entry: IDataEntry): Promise<void> {
@@ -36,6 +93,9 @@ class DataService {
   // Clear all admin configurations (percentages)
   async clearAllConfigurations(): Promise<void> {
     await PercentageConfig.deleteMany({});
+    // Clear all percentage-related cache
+    this.clearCacheByPrefix('b2Data');
+    this.clearCacheByPrefix('b3Data');
   }
 
   // Migration method to fix schema conflicts
@@ -59,10 +119,33 @@ class DataService {
     }
   }
 
-  // B1 values (unique, sorted)
+  // Get B1 values
   async getB1Values(): Promise<string[]> {
+    const cacheKey = this.getCacheKey('b1Values');
+    const cached = this.getFromCache<string[]>(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
     const values = await DataEntry.distinct('B1');
-    return values.sort();
+    
+    // Sắp xếp theo thứ tự tăng dần (số trước, chữ sau)
+    const sortedValues = values.sort((a, b) => {
+      // Thử parse thành số để so sánh số học
+      const numA = parseFloat(a.match(/\d+/)?.[0] || '0');
+      const numB = parseFloat(b.match(/\d+/)?.[0] || '0');
+      
+      if (numA !== numB) {
+        return numA - numB; // Sắp xếp theo số
+      }
+      
+      // Nếu số bằng nhau, sắp xếp theo chữ cái
+      return a.localeCompare(b, 'zh-TW', { numeric: true, sensitivity: 'base' });
+    });
+    
+    console.log('[Backend] Sorted B1 values:', sortedValues);
+    this.setCache(cacheKey, sortedValues);
+    return sortedValues;
   }
 
   // Get data filtered by B1
@@ -77,24 +160,44 @@ class DataService {
     }));
   }
 
-  // Get B2 values with percentages
+  // Get B2 values with percentages - OPTIMIZED
   async getB2Data(b1Value: string): Promise<Array<{ value: string; count: number; totalCount: number; percentage: number }>> {
     console.log(`[Backend] Getting B2 data for B1: ${b1Value}`);
     
-    const allData = await this.getAllData();
-    const filteredData = allData.filter(item => item.B1 === b1Value);
+    const cacheKey = this.getCacheKey('b2Data', b1Value);
+    const cached = this.getFromCache<Array<{ value: string; count: number; totalCount: number; percentage: number }>>(cacheKey);
+    if (cached) {
+      console.log(`[Backend] Returning cached B2 data for B1: ${b1Value}`);
+      return cached;
+    }
+
+    // Use MongoDB aggregation for better performance
+    const pipeline = [
+      { $match: { B1: b1Value } },
+      {
+        $group: {
+          _id: '$B2',
+          count: { $sum: 1 }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          items: { $push: { value: '$_id', count: '$count' } },
+          totalCount: { $sum: '$count' }
+        }
+      }
+    ];
+
+    const aggregationResult = await DataEntry.aggregate(pipeline);
     
-    console.log(`[Backend] Found ${filteredData.length} entries for B1: ${b1Value}`);
-    
-    // Count occurrences
-    const b2Counts: { [key: string]: number } = {};
-    filteredData.forEach(item => {
-      b2Counts[item.B2] = (b2Counts[item.B2] || 0) + 1;
-    });
-    
-    const totalCount = filteredData.length;
-    console.log(`[Backend] B2 counts:`, b2Counts);
-    
+    if (aggregationResult.length === 0) {
+      return [];
+    }
+
+    const { items, totalCount } = aggregationResult[0];
+    console.log(`[Backend] Found ${items.length} B2 values, total ${totalCount} entries for B1: ${b1Value}`);
+
     // Load percentage configs specific to this B1
     const percentageConfigs = await PercentageConfig.find({ 
       type: 'B2', 
@@ -109,7 +212,7 @@ class DataService {
     });
     
     // Build result with configured or natural percentages
-    const result = Object.entries(b2Counts).map(([value, count]) => {
+    const result = items.map(({ value, count }: { value: string; count: number }) => {
       const naturalPercentage = Math.round((count / totalCount) * 100);
       const configuredPercentage = configMap[value];
       
@@ -119,30 +222,56 @@ class DataService {
         totalCount,
         percentage: configuredPercentage !== undefined ? configuredPercentage : naturalPercentage
       };
-    });
+    })
+    .sort((a: { value: string; count: number; totalCount: number; percentage: number }, 
+           b: { value: string; count: number; totalCount: number; percentage: number }) => 
+           b.percentage - a.percentage); // Sort by percentage descending (highest first)
     
-    console.log(`[Backend] B2 data result for B1 ${b1Value}:`, result);
+    console.log(`[Backend] B2 data result for B1 ${b1Value} (sorted by % desc):`, result);
+    
+    // Cache with shorter TTL for data queries
+    this.setCache(cacheKey, result, 2 * 60 * 1000); // 2 minutes
     return result;
   }
 
-  // Get B3 values with percentages
+  // Get B3 values with percentages - OPTIMIZED
   async getB3Data(b1Value: string, b2Value: string): Promise<Array<{ value: string; count: number; totalCount: number; percentage: number }>> {
     console.log(`[Backend] Getting B3 data for B1: ${b1Value}, B2: ${b2Value}`);
     
-    const allData = await this.getAllData();
-    const filteredData = allData.filter(item => item.B1 === b1Value && item.B2 === b2Value);
+    const cacheKey = this.getCacheKey('b3Data', b1Value, b2Value);
+    const cached = this.getFromCache<Array<{ value: string; count: number; totalCount: number; percentage: number }>>(cacheKey);
+    if (cached) {
+      console.log(`[Backend] Returning cached B3 data for B1: ${b1Value}, B2: ${b2Value}`);
+      return cached;
+    }
+
+    // Use MongoDB aggregation for better performance
+    const pipeline = [
+      { $match: { B1: b1Value, B2: b2Value } },
+      {
+        $group: {
+          _id: '$B3',
+          count: { $sum: 1 }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          items: { $push: { value: '$_id', count: '$count' } },
+          totalCount: { $sum: '$count' }
+        }
+      }
+    ];
+
+    const aggregationResult = await DataEntry.aggregate(pipeline);
     
-    console.log(`[Backend] Found ${filteredData.length} entries for B1: ${b1Value}, B2: ${b2Value}`);
-    
-    // Count occurrences
-    const b3Counts: { [key: string]: number } = {};
-    filteredData.forEach(item => {
-      b3Counts[item.B3] = (b3Counts[item.B3] || 0) + 1;
-    });
-    
-    const totalCount = filteredData.length;
-    console.log(`[Backend] B3 counts:`, b3Counts);
-    
+    if (aggregationResult.length === 0) {
+      return [];
+    }
+
+    const { items, totalCount } = aggregationResult[0];
+    console.log(`[Backend] Found ${items.length} B3 values, total ${totalCount} entries for B1: ${b1Value}, B2: ${b2Value}`);
+
     // Load percentage configs specific to this B1 and B2 combination
     const percentageConfigs = await PercentageConfig.find({ 
       type: 'B3', 
@@ -158,7 +287,7 @@ class DataService {
     });
     
     // Build result with configured or natural percentages
-    const result = Object.entries(b3Counts).map(([value, count]) => {
+    const result = items.map(({ value, count }: { value: string; count: number }) => {
       const naturalPercentage = Math.round((count / totalCount) * 100);
       const configuredPercentage = configMap[value];
       
@@ -168,21 +297,36 @@ class DataService {
         totalCount,
         percentage: configuredPercentage !== undefined ? configuredPercentage : naturalPercentage
       };
-    });
+    })
+    .sort((a: { value: string; count: number; totalCount: number; percentage: number }, 
+           b: { value: string; count: number; totalCount: number; percentage: number }) => 
+           b.percentage - a.percentage); // Sort by percentage descending (highest first)
     
-    console.log(`[Backend] B3 data result for B1 ${b1Value}, B2 ${b2Value}:`, result);
+    console.log(`[Backend] B3 data result for B1 ${b1Value}, B2 ${b2Value} (sorted by % desc):`, result);
+    
+    // Cache with shorter TTL for data queries
+    this.setCache(cacheKey, result, 2 * 60 * 1000); // 2 minutes
     return result;
   }
 
-  // Get details for B3
+  // Get details for B3 - OPTIMIZED
   async getB3Details(b1Value: string, b2Value: string, b3Value: string): Promise<string[]> {
+    const cacheKey = this.getCacheKey('b3Details', b1Value, b2Value, b3Value);
+    const cached = this.getFromCache<string[]>(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
     const entries = await DataEntry.find({
       B1: b1Value,
       B2: b2Value,
       B3: b3Value
-    }).lean();
+    }).select('detail').lean();
     
-    return entries.map(entry => entry.detail).filter(detail => detail);
+    const result = entries.map(entry => entry.detail).filter(detail => detail);
+    
+    this.setCache(cacheKey, result, 10 * 60 * 1000); // 10 minutes for details
+    return result;
   }
 
   // Percentage config methods
@@ -195,6 +339,9 @@ class DataService {
         { percentage },
         { upsert: true, new: true }
       );
+      
+      // Clear related cache entries
+      this.clearCacheByPrefix(`b2Data:${b1Value}`);
       
       console.log(`[Backend] B2 percentage saved successfully: B1=${b1Value}, value=${value} = ${percentage}%`);
       console.log(`[Backend] Result:`, result);
@@ -214,6 +361,9 @@ class DataService {
         { upsert: true, new: true }
       );
       
+      // Clear related cache entries
+      this.clearCacheByPrefix(`b3Data:${b1Value}:${b2Value}`);
+      
       console.log(`[Backend] B3 percentage saved successfully: B1=${b1Value}, B2=${b2Value}, value=${value} = ${percentage}%`);
       console.log(`[Backend] Result:`, result);
     } catch (error) {
@@ -222,19 +372,34 @@ class DataService {
     }
   }
 
-  // Phone brands methods
+  // Phone brands methods - with caching
   async getPhoneBrands(): Promise<IPhoneBrand[]> {
+    const cacheKey = this.getCacheKey('phoneBrands');
+    const cached = this.getFromCache<IPhoneBrand[]>(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
     const brands = await PhoneBrand.find().lean();
-    return brands.map(brand => ({
+    const result = brands.map(brand => ({
       _id: brand._id?.toString(),
       name: brand.name,
       percentage: brand.percentage
-    }));
+    }))
+    .sort((a: IPhoneBrand, b: IPhoneBrand) => b.percentage - a.percentage); // Sort by percentage descending
+
+    console.log('[Backend] Phone brands sorted by percentage desc:', result);
+    this.setCache(cacheKey, result);
+    return result;
   }
 
   async addPhoneBrand(brand: Omit<IPhoneBrand, '_id'>): Promise<IPhoneBrand> {
     const newBrand = new PhoneBrand(brand);
     await newBrand.save();
+    
+    // Clear phone brands cache
+    this.clearCacheByPrefix('phoneBrands');
+    
     return {
       _id: newBrand._id?.toString(),
       name: newBrand.name,
@@ -246,6 +411,9 @@ class DataService {
     const brand = await PhoneBrand.findByIdAndUpdate(id, updates, { new: true }).lean();
     if (!brand) return null;
     
+    // Clear phone brands cache
+    this.clearCacheByPrefix('phoneBrands');
+    
     return {
       _id: brand._id?.toString(),
       name: brand.name,
@@ -255,6 +423,12 @@ class DataService {
 
   async deletePhoneBrand(id: string): Promise<boolean> {
     const result = await PhoneBrand.findByIdAndDelete(id);
+    
+    if (result) {
+      // Clear phone brands cache
+      this.clearCacheByPrefix('phoneBrands');
+    }
+    
     return !!result;
   }
 

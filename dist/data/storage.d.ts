@@ -1,5 +1,12 @@
 import { DataEntry as IDataEntry, PhoneBrand as IPhoneBrand } from '../types';
 declare class DataService {
+    private cache;
+    private readonly DEFAULT_TTL;
+    private getCacheKey;
+    private isValidCacheItem;
+    private getFromCache;
+    private setCache;
+    private clearCacheByPrefix;
     getAllData(): Promise<IDataEntry[]>;
     setData(data: IDataEntry[]): Promise<void>;
     addDataEntry(entry: IDataEntry): Promise<void>;

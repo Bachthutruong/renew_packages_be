@@ -11,6 +11,11 @@ const DataEntrySchema = new Schema<IDataEntry>({
   timestamps: true
 });
 
+// Add compound indexes for better query performance
+DataEntrySchema.index({ B1: 1, B2: 1 }); // For B3 queries
+DataEntrySchema.index({ B1: 1, B2: 1, B3: 1 }); // For B3 details queries
+DataEntrySchema.index({ B1: 1 }); // For B2 queries
+
 // PercentageConfig Schema
 const PercentageConfigSchema = new Schema<IPercentageConfig>({
   type: { type: String, enum: ['B2', 'B3'], required: true },
@@ -24,6 +29,9 @@ const PercentageConfigSchema = new Schema<IPercentageConfig>({
 
 // Compound index for type, B1, B2, and value to ensure uniqueness
 PercentageConfigSchema.index({ type: 1, B1: 1, B2: 1, value: 1 }, { unique: true });
+// Additional indexes for better query performance
+PercentageConfigSchema.index({ type: 1, B1: 1 }); // For B2 percentage configs
+PercentageConfigSchema.index({ type: 1, B1: 1, B2: 1 }); // For B3 percentage configs
 
 // PhoneBrand Schema
 const PhoneBrandSchema = new Schema<IPhoneBrand>({

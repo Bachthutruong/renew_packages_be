@@ -24,7 +24,7 @@ router.post('/import', auth_1.authenticateToken, auth_1.requireAdmin, upload.sin
             B1: row.B1 || '',
             B2: row.B2 || '',
             B3: row.B3 || '',
-            detail: row['Chi tiết của B3'] || ''
+            detail: row['B3的詳細資料'] || ''
         }));
         await storage_1.dataService.setData(dataEntries);
         res.json({

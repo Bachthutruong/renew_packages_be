@@ -3,7 +3,7 @@ export interface ExcelRow {
     B1: string;
     B2: string;
     B3: string;
-    'Chi tiết của B3': string;
+    'B3的詳細資料': string;
 }
 export interface IDataEntry extends Document {
     B1: string;
