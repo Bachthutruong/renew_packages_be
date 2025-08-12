@@ -37,6 +37,11 @@ class DataService {
             }
         }
     }
+    // Force clear specific cache key
+    forceClearCache(key) {
+        this.cache.delete(key);
+        console.log(`[Backend] Force cleared cache for key: ${key}`);
+    }
     // Data methods
     async getAllData() {
         const cacheKey = this.getCacheKey('allData');
@@ -107,7 +112,18 @@ class DataService {
             return cached;
         }
         const values = await models_1.DataEntry.distinct('B1');
-        const sortedValues = values.sort((a, b) => a.localeCompare(b));
+        // Sắp xếp theo thứ tự tăng dần (số trước, chữ sau)
+        const sortedValues = values.sort((a, b) => {
+            // Thử parse thành số để so sánh số học
+            const numA = parseFloat(a.match(/\d+/)?.[0] || '0');
+            const numB = parseFloat(b.match(/\d+/)?.[0] || '0');
+            if (numA !== numB) {
+                return numA - numB; // Sắp xếp theo số
+            }
+            // Nếu số bằng nhau, sắp xếp theo chữ cái
+            return a.localeCompare(b, 'zh-TW', { numeric: true, sensitivity: 'base' });
+        });
+        console.log('[Backend] Sorted B1 values:', sortedValues);
         this.setCache(cacheKey, sortedValues);
         return sortedValues;
     }
@@ -174,8 +190,9 @@ class DataService {
                 totalCount,
                 percentage: configuredPercentage !== undefined ? configuredPercentage : naturalPercentage
             };
-        });
-        console.log(`[Backend] B2 data result for B1 ${b1Value}:`, result);
+        })
+            .sort((a, b) => b.percentage - a.percentage); // Sort by percentage descending (highest first)
+        console.log(`[Backend] B2 data result for B1 ${b1Value} (sorted by % desc):`, result);
         // Cache with shorter TTL for data queries
         this.setCache(cacheKey, result, 2 * 60 * 1000); // 2 minutes
         return result;
@@ -233,27 +250,114 @@ class DataService {
                 totalCount,
                 percentage: configuredPercentage !== undefined ? configuredPercentage : naturalPercentage
             };
-        });
-        console.log(`[Backend] B3 data result for B1 ${b1Value}, B2 ${b2Value}:`, result);
+        })
+            .sort((a, b) => b.percentage - a.percentage); // Sort by percentage descending (highest first)
+        console.log(`[Backend] B3 data result for B1 ${b1Value}, B2 ${b2Value} (sorted by % desc):`, result);
         // Cache with shorter TTL for data queries
         this.setCache(cacheKey, result, 2 * 60 * 1000); // 2 minutes
         return result;
     }
-    // Get details for B3 - OPTIMIZED
+    // Get details for B3 - OPTIMIZED with grouping and percentages
     async getB3Details(b1Value, b2Value, b3Value) {
+        console.log(`[Backend] getB3Details called with:`, { b1Value, b2Value, b3Value });
         const cacheKey = this.getCacheKey('b3Details', b1Value, b2Value, b3Value);
-        const cached = this.getFromCache(cacheKey);
-        if (cached) {
-            return cached;
-        }
+        // Force clear cache for debugging - ALWAYS get fresh data
+        this.forceClearCache(cacheKey);
+        console.log(`[Backend] Force cleared cache for key: ${cacheKey}`);
+        // Don't use cache during debugging
+        // const cached = this.getFromCache<GroupedB3Detail[]>(cacheKey);
+        // if (cached) {
+        //   console.log(`[Backend] Returning cached B3 details, count: ${cached.length}`);
+        //   console.log(`[Backend] Cached sample:`, cached[0]);
+        //   return cached;
+        // }
+        console.log(`[Backend] Fetching fresh data from database...`);
         const entries = await models_1.DataEntry.find({
             B1: b1Value,
             B2: b2Value,
             B3: b3Value
         }).select('detail').lean();
-        const result = entries.map(entry => entry.detail).filter(detail => detail);
-        this.setCache(cacheKey, result, 10 * 60 * 1000); // 10 minutes for details
+        console.log(`[Backend] Found ${entries.length} entries from database`);
+        console.log(`[Backend] Sample entries:`, entries.slice(0, 3));
+        const details = entries.map(entry => entry.detail).filter(detail => detail && detail.trim());
+        console.log(`[Backend] After filtering empty details: ${details.length} remain`);
+        console.log(`[Backend] Sample details:`, details.slice(0, 3));
+        // Group identical details and count occurrences
+        const groupedDetails = new Map();
+        details.forEach((detail, index) => {
+            const trimmedDetail = detail.trim();
+            const currentCount = groupedDetails.get(trimmedDetail) || 0;
+            groupedDetails.set(trimmedDetail, currentCount + 1);
+            // Log first few grouping operations for debugging
+            if (index < 5) {
+                console.log(`[Backend] Grouping[${index}]: "${trimmedDetail}" -> count: ${currentCount + 1}`);
+            }
+        });
+        console.log(`[Backend] Grouped into ${groupedDetails.size} unique details from ${details.length} total`);
+        console.log(`[Backend] Top 5 groups:`, Array.from(groupedDetails.entries())
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 5)
+            .map(([detail, count]) => ({ detail: detail.substring(0, 50) + '...', count })));
+        const totalCount = details.length;
+        // Get configured percentages for these details
+        const configuredPercentages = await models_1.PercentageConfig.find({
+            type: 'B3_DETAIL',
+            B1: b1Value,
+            B2: b2Value,
+            B3: b3Value
+        }).lean();
+        const configMap = new Map(configuredPercentages.map(config => [config.value, config.percentage]));
+        // Convert to result format with percentages
+        const result = Array.from(groupedDetails.entries()).map(([detail, count]) => ({
+            detail,
+            count,
+            totalCount,
+            percentage: totalCount > 0 ? Math.round((count / totalCount) * 100 * 100) / 100 : 0,
+            configuredPercentage: configMap.get(detail)
+        })).sort((a, b) => b.count - a.count); // Sort by count descending
+        console.log(`[Backend] Final result count: ${result.length}`);
+        console.log(`[Backend] Result sample:`, result[0]);
+        console.log(`[Backend] Result structure check:`, {
+            hasDetail: !!result[0]?.detail,
+            hasCount: typeof result[0]?.count === 'number',
+            hasTotalCount: typeof result[0]?.totalCount === 'number',
+            hasPercentage: typeof result[0]?.percentage === 'number'
+        });
+        // Don't cache during debugging
+        // this.setCache(cacheKey, result, 10 * 60 * 1000); // 10 minutes for details
         return result;
+    }
+    // Update B3 detail percentage
+    async updateB3DetailPercentage(b1Value, b2Value, b3Value, detail, percentage) {
+        console.log(`[Backend] Updating B3 detail percentage: B1=${b1Value}, B2=${b2Value}, B3=${b3Value}, detail="${detail}" = ${percentage}%`);
+        try {
+            const result = await models_1.PercentageConfig.findOneAndUpdate({
+                type: 'B3_DETAIL',
+                B1: b1Value,
+                B2: b2Value,
+                B3: b3Value,
+                value: detail
+            }, {
+                type: 'B3_DETAIL',
+                B1: b1Value,
+                B2: b2Value,
+                B3: b3Value,
+                value: detail,
+                percentage
+            }, { upsert: true, new: true });
+            console.log(`[Backend] B3 detail percentage saved successfully:`, result);
+            // Clear ALL related cache entries
+            this.clearCacheByPrefix(`b3Details:${b1Value}:${b2Value}:${b3Value}`);
+            this.clearCacheByPrefix(`b3Details`);
+            // Also clear any test endpoints cache
+            this.clearCacheByPrefix(`test:b3Details`);
+            this.clearCacheByPrefix(`grouped:b3Details`);
+            console.log(`[Backend] Cache cleared for B3 details: B1=${b1Value}, B2=${b2Value}, B3=${b3Value}`);
+        }
+        catch (error) {
+            console.error(`[Backend] Error updating B3 detail percentage:`, error);
+            throw error;
+        }
     }
     // Percentage config methods
     async updateB2Percentage(b1Value, value, percentage) {
@@ -296,7 +400,9 @@ class DataService {
             _id: brand._id?.toString(),
             name: brand.name,
             percentage: brand.percentage
-        }));
+        }))
+            .sort((a, b) => b.percentage - a.percentage); // Sort by percentage descending
+        console.log('[Backend] Phone brands sorted by percentage desc:', result);
         this.setCache(cacheKey, result);
         return result;
     }

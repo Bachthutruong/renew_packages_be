@@ -50,19 +50,21 @@ DataEntrySchema.index({ B1: 1, B2: 1, B3: 1 }); // For B3 details queries
 DataEntrySchema.index({ B1: 1 }); // For B2 queries
 // PercentageConfig Schema
 const PercentageConfigSchema = new mongoose_1.Schema({
-    type: { type: String, enum: ['B2', 'B3'], required: true },
+    type: { type: String, enum: ['B2', 'B3', 'B3_DETAIL'], required: true },
     B1: { type: String, required: true, index: true },
     B2: { type: String, index: true }, // Optional, used for B3 configs
+    B3: { type: String, index: true }, // Optional, used for B3_DETAIL configs
     value: { type: String, required: true },
     percentage: { type: Number, default: 0, min: 0, max: 100 }
 }, {
     timestamps: true
 });
-// Compound index for type, B1, B2, and value to ensure uniqueness
-PercentageConfigSchema.index({ type: 1, B1: 1, B2: 1, value: 1 }, { unique: true });
+// Compound index for type, B1, B2, B3, and value to ensure uniqueness
+PercentageConfigSchema.index({ type: 1, B1: 1, B2: 1, B3: 1, value: 1 }, { unique: true });
 // Additional indexes for better query performance
 PercentageConfigSchema.index({ type: 1, B1: 1 }); // For B2 percentage configs
 PercentageConfigSchema.index({ type: 1, B1: 1, B2: 1 }); // For B3 percentage configs
+PercentageConfigSchema.index({ type: 1, B1: 1, B2: 1, B3: 1 }); // For B3_DETAIL percentage configs
 // PhoneBrand Schema
 const PhoneBrandSchema = new mongoose_1.Schema({
     name: { type: String, required: true, unique: true },

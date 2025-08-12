@@ -17,9 +17,10 @@ export interface IDataEntry extends Document {
 }
 
 export interface IPercentageConfig extends Document {
-  type: 'B2' | 'B3';
+  type: 'B2' | 'B3' | 'B3_DETAIL';
   B1: string;
   B2?: string; // For B3 configs, we need B2 context too
+  B3?: string; // For B3_DETAIL configs, we need B3 context too
   value: string;
   percentage: number;
   createdAt: Date;
@@ -76,4 +77,12 @@ export interface FilteredData {
 export interface AdminSettings {
   percentageConfigs: PercentageConfig;
   phoneBrands: PhoneBrand[];
+}
+
+export interface GroupedB3Detail {
+  detail: string;
+  count: number;
+  totalCount: number;
+  percentage: number;
+  configuredPercentage?: number;
 } 

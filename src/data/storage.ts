@@ -1,5 +1,5 @@
 import { DataEntry, PercentageConfig, PhoneBrand, User } from '../models';
-import { DataEntry as IDataEntry, PhoneBrand as IPhoneBrand } from '../types';
+import { DataEntry as IDataEntry, PhoneBrand as IPhoneBrand, GroupedB3Detail } from '../types';
 
 // Simple in-memory cache
 interface CacheItem<T> {
@@ -45,6 +45,12 @@ class DataService {
         this.cache.delete(key);
       }
     }
+  }
+
+  // Force clear specific cache key
+  forceClearCache(key: string): void {
+    this.cache.delete(key);
+    console.log(`[Backend] Force cleared cache for key: ${key}`);
   }
 
   // Data methods
@@ -309,24 +315,135 @@ class DataService {
     return result;
   }
 
-  // Get details for B3 - OPTIMIZED
-  async getB3Details(b1Value: string, b2Value: string, b3Value: string): Promise<string[]> {
+  // Get details for B3 - OPTIMIZED with grouping and percentages
+  async getB3Details(b1Value: string, b2Value: string, b3Value: string): Promise<GroupedB3Detail[]> {
+    console.log(`[Backend] getB3Details called with:`, { b1Value, b2Value, b3Value });
+    
     const cacheKey = this.getCacheKey('b3Details', b1Value, b2Value, b3Value);
-    const cached = this.getFromCache<string[]>(cacheKey);
-    if (cached) {
-      return cached;
-    }
+    
+    // Force clear cache for debugging - ALWAYS get fresh data
+    this.forceClearCache(cacheKey);
+    console.log(`[Backend] Force cleared cache for key: ${cacheKey}`);
+    
+    // Don't use cache during debugging
+    // const cached = this.getFromCache<GroupedB3Detail[]>(cacheKey);
+    // if (cached) {
+    //   console.log(`[Backend] Returning cached B3 details, count: ${cached.length}`);
+    //   console.log(`[Backend] Cached sample:`, cached[0]);
+    //   return cached;
+    // }
 
+    console.log(`[Backend] Fetching fresh data from database...`);
     const entries = await DataEntry.find({
       B1: b1Value,
       B2: b2Value,
       B3: b3Value
     }).select('detail').lean();
     
-    const result = entries.map(entry => entry.detail).filter(detail => detail);
+    console.log(`[Backend] Found ${entries.length} entries from database`);
+    console.log(`[Backend] Sample entries:`, entries.slice(0, 3));
     
-    this.setCache(cacheKey, result, 10 * 60 * 1000); // 10 minutes for details
+    const details = entries.map(entry => entry.detail).filter(detail => detail && detail.trim());
+    
+    console.log(`[Backend] After filtering empty details: ${details.length} remain`);
+    console.log(`[Backend] Sample details:`, details.slice(0, 3));
+    
+    // Group identical details and count occurrences
+    const groupedDetails = new Map<string, number>();
+    details.forEach((detail, index) => {
+      const trimmedDetail = detail.trim();
+      const currentCount = groupedDetails.get(trimmedDetail) || 0;
+      groupedDetails.set(trimmedDetail, currentCount + 1);
+      
+      // Log first few grouping operations for debugging
+      if (index < 5) {
+        console.log(`[Backend] Grouping[${index}]: "${trimmedDetail}" -> count: ${currentCount + 1}`);
+      }
+    });
+
+    console.log(`[Backend] Grouped into ${groupedDetails.size} unique details from ${details.length} total`);
+    console.log(`[Backend] Top 5 groups:`, Array.from(groupedDetails.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([detail, count]) => ({ detail: detail.substring(0, 50) + '...', count }))
+    );
+
+    const totalCount = details.length;
+    
+    // Get configured percentages for these details
+    const configuredPercentages = await PercentageConfig.find({
+      type: 'B3_DETAIL',
+      B1: b1Value,
+      B2: b2Value,
+      B3: b3Value
+    }).lean();
+
+    const configMap = new Map(
+      configuredPercentages.map(config => [config.value, config.percentage])
+    );
+
+    // Convert to result format with percentages
+    const result: GroupedB3Detail[] = Array.from(groupedDetails.entries()).map(([detail, count]) => ({
+      detail,
+      count,
+      totalCount,
+      percentage: totalCount > 0 ? Math.round((count / totalCount) * 100 * 100) / 100 : 0,
+      configuredPercentage: configMap.get(detail)
+    })).sort((a, b) => b.count - a.count); // Sort by count descending
+    
+    console.log(`[Backend] Final result count: ${result.length}`);
+    console.log(`[Backend] Result sample:`, result[0]);
+    console.log(`[Backend] Result structure check:`, {
+      hasDetail: !!result[0]?.detail,
+      hasCount: typeof result[0]?.count === 'number',
+      hasTotalCount: typeof result[0]?.totalCount === 'number',
+      hasPercentage: typeof result[0]?.percentage === 'number'
+    });
+    
+    // Don't cache during debugging
+    // this.setCache(cacheKey, result, 10 * 60 * 1000); // 10 minutes for details
     return result;
+  }
+
+  // Update B3 detail percentage
+  async updateB3DetailPercentage(b1Value: string, b2Value: string, b3Value: string, detail: string, percentage: number): Promise<void> {
+    console.log(`[Backend] Updating B3 detail percentage: B1=${b1Value}, B2=${b2Value}, B3=${b3Value}, detail="${detail}" = ${percentage}%`);
+    
+    try {
+      const result = await PercentageConfig.findOneAndUpdate(
+        {
+          type: 'B3_DETAIL',
+          B1: b1Value,
+          B2: b2Value,
+          B3: b3Value,
+          value: detail
+        },
+        {
+          type: 'B3_DETAIL',
+          B1: b1Value,
+          B2: b2Value,
+          B3: b3Value,
+          value: detail,
+          percentage
+        },
+        { upsert: true, new: true }
+      );
+
+      console.log(`[Backend] B3 detail percentage saved successfully:`, result);
+
+      // Clear ALL related cache entries
+      this.clearCacheByPrefix(`b3Details:${b1Value}:${b2Value}:${b3Value}`);
+      this.clearCacheByPrefix(`b3Details`);
+      
+      // Also clear any test endpoints cache
+      this.clearCacheByPrefix(`test:b3Details`);
+      this.clearCacheByPrefix(`grouped:b3Details`);
+      
+      console.log(`[Backend] Cache cleared for B3 details: B1=${b1Value}, B2=${b2Value}, B3=${b3Value}`);
+    } catch (error) {
+      console.error(`[Backend] Error updating B3 detail percentage:`, error);
+      throw error;
+    }
   }
 
   // Percentage config methods

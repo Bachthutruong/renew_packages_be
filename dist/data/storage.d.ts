@@ -1,4 +1,4 @@
-import { DataEntry as IDataEntry, PhoneBrand as IPhoneBrand } from '../types';
+import { DataEntry as IDataEntry, PhoneBrand as IPhoneBrand, GroupedB3Detail } from '../types';
 declare class DataService {
     private cache;
     private readonly DEFAULT_TTL;
@@ -7,6 +7,7 @@ declare class DataService {
     private getFromCache;
     private setCache;
     private clearCacheByPrefix;
+    forceClearCache(key: string): void;
     getAllData(): Promise<IDataEntry[]>;
     setData(data: IDataEntry[]): Promise<void>;
     addDataEntry(entry: IDataEntry): Promise<void>;
@@ -27,7 +28,8 @@ declare class DataService {
         totalCount: number;
         percentage: number;
     }>>;
-    getB3Details(b1Value: string, b2Value: string, b3Value: string): Promise<string[]>;
+    getB3Details(b1Value: string, b2Value: string, b3Value: string): Promise<GroupedB3Detail[]>;
+    updateB3DetailPercentage(b1Value: string, b2Value: string, b3Value: string, detail: string, percentage: number): Promise<void>;
     updateB2Percentage(b1Value: string, value: string, percentage: number): Promise<void>;
     updateB3Percentage(b1Value: string, b2Value: string, value: string, percentage: number): Promise<void>;
     getPhoneBrands(): Promise<IPhoneBrand[]>;
